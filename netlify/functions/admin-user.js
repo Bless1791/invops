@@ -1,228 +1,126 @@
-/**
- * InvOps — Email Alert Function
- * POST /.netlify/functions/send-email
- *
- * Environment variables needed in Netlify:
- *   SMTP_HOST      e.g. smtp.gmail.com  (or smtp.sendgrid.net)
- *   SMTP_PORT      e.g. 587
- *   SMTP_SECURE    true if port 465, false otherwise
- *   SMTP_USER      your SMTP login email
- *   SMTP_PASS      your SMTP password / app password
- *   FROM_EMAIL     e.g. noreply@yourcompany.com
- *   FROM_NAME      e.g. InvOps System  (optional)
- *
- * Body (JSON):
- *   type    — alert type key (see TEMPLATES below)
- *   to      — string or array of email addresses
- *   data    — object with template variables
- */
+const { createClient } = require('@supabase/supabase-js');
 
-const nodemailer = require('nodemailer');
+const CORS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS'
+};
 
-// ── EMAIL TEMPLATES ──────────────────────────────────────────────────────────
-const BRAND = '#0D9488';
-const header = (org) => `
-<div style="background:${BRAND};padding:18px 24px;border-radius:8px 8px 0 0">
-  <span style="color:#fff;font-size:17px;font-weight:800;font-family:Arial,sans-serif">📦 ${org || 'InvOps'}</span>
-  <span style="color:rgba(255,255,255,.65);font-size:11px;font-family:Arial,sans-serif;margin-left:10px">Inventory Management System</span>
-</div>`;
-const footer = () => `
-<div style="padding:14px 24px;background:#F7F9FC;border-top:1px solid #E3E8F0;border-radius:0 0 8px 8px;color:#94A3B8;font-size:11px;font-family:Arial,sans-serif">
-  This is an automated notification from InvOps. Do not reply to this email.
-</div>`;
-const wrap = (org, body) => `
-<!DOCTYPE html><html><body style="margin:0;padding:20px;background:#EEF2F7;font-family:Arial,sans-serif">
-<div style="max-width:580px;margin:0 auto;background:#fff;border-radius:8px;border:1px solid #E3E8F0;overflow:hidden">
-  ${header(org)}
-  <div style="padding:22px 24px">${body}</div>
-  ${footer()}
-</div></body></html>`;
+function ok(data)      { return { statusCode: 200, headers: CORS, body: JSON.stringify(data) }; }
+function err(code, msg){ return { statusCode: code, headers: CORS, body: JSON.stringify({ error: msg }) }; }
 
-const h2 = (t) => `<h2 style="color:#0F172A;font-size:16px;margin:0 0 12px">${t}</h2>`;
-const p  = (t) => `<p style="color:#374151;font-size:13px;line-height:1.6;margin:0 0 10px">${t}</p>`;
-const kv = (k,v) => `<tr><td style="padding:6px 12px;color:#64748B;font-size:12px;border-bottom:1px solid #F1F5F9">${k}</td><td style="padding:6px 12px;font-size:12px;font-weight:600;color:#0F172A;border-bottom:1px solid #F1F5F9">${v}</td></tr>`;
-const table = (rows) => `<table style="width:100%;border-collapse:collapse;margin:12px 0;border:1px solid #E3E8F0;border-radius:6px;overflow:hidden">${rows}</table>`;
-const badge = (text, color) => `<span style="background:${color}22;color:${color};padding:2px 9px;border-radius:12px;font-size:11px;font-weight:700">${text}</span>`;
-const btn = (text, url) => url
-  ? `<a href="${url}" style="display:inline-block;margin-top:14px;background:${BRAND};color:#fff;padding:10px 20px;border-radius:6px;font-size:13px;font-weight:700;text-decoration:none">${text}</a>`
-  : '';
-
-const PRIORITY_COLOR = { Urgent:'#EF4444', High:'#F59E0B', Normal:'#0D9488', Low:'#94A3B8' };
-const STATUS_COLOR   = { 'Pending L1':'#F59E0B','Pending L2':'#3B82F6','Approved':'#10B981','Disbursed':'#7C3AED','Rejected':'#EF4444' };
-
-function buildTemplate(type, d) {
-  const org = d.org || 'InvOps';
-  switch (type) {
-
-    case 'request_submitted':
-      return {
-        subject: `[${org}] New Request ${d.requestId} — ${d.department}`,
-        html: wrap(org, `
-          ${h2('📋 New Inventory Request Submitted')}
-          ${p(`A new requisition has been submitted and is awaiting your approval.`)}
-          ${table(
-            kv('Request ID',  d.requestId) +
-            kv('Submitted By', d.requestedByName) +
-            kv('Department',  d.department) +
-            kv('Purpose',     d.purpose) +
-            kv('Priority',    badge(d.priority, PRIORITY_COLOR[d.priority]||'#94A3B8')) +
-            kv('Items',       d.itemSummary) +
-            kv('Date',        d.date)
-          )}
-          ${p('Please log in to InvOps to review and approve or reject this request.')}
-        `)
-      };
-
-    case 'request_approved_l1':
-      return {
-        subject: `[${org}] Request ${d.requestId} — Approved at L1`,
-        html: wrap(org, `
-          ${h2('✅ Your Request was Approved (L1)')}
-          ${p(`Good news! Your inventory request has been approved at the first level and is now pending final approval.`)}
-          ${table(
-            kv('Request ID', d.requestId) +
-            kv('Department', d.department) +
-            kv('Approved By', d.approvedBy) +
-            kv('Comment',   d.comment||'—') +
-            kv('Next Step',  'Awaiting L2 (Final) Approval')
-          )}
-        `)
-      };
-
-    case 'request_approved_final':
-      return {
-        subject: `[${org}] Request ${d.requestId} — Fully Approved — Ready for Disbursement`,
-        html: wrap(org, `
-          ${h2('✅ Your Request has been Fully Approved')}
-          ${p(`Your inventory request has received final approval and is now ready for disbursement.`)}
-          ${table(
-            kv('Request ID',  d.requestId) +
-            kv('Department',  d.department) +
-            kv('Approved By', d.approvedBy) +
-            kv('Comment',     d.comment||'—') +
-            kv('Status',      badge('Approved', '#10B981'))
-          )}
-          ${p('The store team will process the disbursement shortly.')}
-        `)
-      };
-
-    case 'request_rejected':
-      return {
-        subject: `[${org}] Request ${d.requestId} — Rejected`,
-        html: wrap(org, `
-          ${h2('❌ Your Request was Rejected')}
-          ${p(`Unfortunately your inventory request has been rejected.`)}
-          ${table(
-            kv('Request ID',  d.requestId) +
-            kv('Department',  d.department) +
-            kv('Rejected By', d.rejectedBy) +
-            kv('Reason',      `<span style="color:#EF4444">${d.comment||'No reason provided'}</span>`) +
-            kv('Status',      badge('Rejected','#EF4444'))
-          )}
-          ${p('You may submit a revised request if appropriate.')}
-        `)
-      };
-
-    case 'request_disbursed':
-      return {
-        subject: `[${org}] Request ${d.requestId} — Items Disbursed`,
-        html: wrap(org, `
-          ${h2('📤 Your Items Have Been Disbursed')}
-          ${p(`The approved items for your request have been disbursed from the store.`)}
-          ${table(
-            kv('Request ID',    d.requestId) +
-            kv('Department',    d.department) +
-            kv('Disbursed By',  d.disbursedBy) +
-            kv('Date',          d.date) +
-            kv('Items Issued',  d.itemSummary) +
-            kv('Status',        badge('Disbursed','#7C3AED'))
-          )}
-          ${d.note ? p(`<em>Note: ${d.note}</em>`) : ''}
-        `)
-      };
-
-    case 'stock_alert':
-      return {
-        subject: `[${org}] ⚠️ Stock Alert — ${d.criticalCount} critical, ${d.lowCount} low`,
-        html: wrap(org, `
-          ${h2('⚠️ Inventory Stock Alert')}
-          ${p(`The following items require immediate attention:`)}
-          ${d.criticalItems && d.criticalItems.length ? `
-            <div style="margin:10px 0 6px;font-size:11px;font-weight:700;text-transform:uppercase;color:#EF4444;letter-spacing:.5px">Critical / Out of Stock</div>
-            ${table(d.criticalItems.map(i => kv(i.name, `<span style="color:#EF4444;font-weight:700">${i.stock} ${i.unit}</span> (min: ${i.min})`)).join(''))}` : ''}
-          ${d.lowItems && d.lowItems.length ? `
-            <div style="margin:10px 0 6px;font-size:11px;font-weight:700;text-transform:uppercase;color:#B45309;letter-spacing:.5px">Low Stock</div>
-            ${table(d.lowItems.map(i => kv(i.name, `<span style="color:#B45309;font-weight:700">${i.stock} ${i.unit}</span> (min: ${i.min})`)).join(''))}` : ''}
-          ${p('Please arrange restocking as soon as possible.')}
-        `)
-      };
-
-    case 'new_user_welcome':
-      return {
-        subject: `[${org}] Welcome to InvOps — Your Account is Ready`,
-        html: wrap(org, `
-          ${h2('👋 Welcome to InvOps!')}
-          ${p(`Your account has been created. Here are your login details:`)}
-          ${table(
-            kv('Email',    d.email) +
-            kv('Password', '<em>Set by your administrator — please change it after first login</em>') +
-            kv('Role',     d.role)
-          )}
-          ${p('Please sign in and change your password as soon as possible.')}
-        `)
-      };
-
-    default:
-      return { subject: `[${org}] System Notification`, html: wrap(org, p(JSON.stringify(d))) };
-  }
-}
-
-// ── HANDLER ──────────────────────────────────────────────────────────────────
 exports.handler = async (event) => {
-  const corsHeaders = {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-    'Access-Control-Allow-Methods': 'POST, OPTIONS'
-  };
+  if (event.httpMethod === 'OPTIONS') return { statusCode: 200, headers: CORS, body: '' };
+  if (event.httpMethod !== 'POST')    return err(405, 'Method Not Allowed');
 
-  if (event.httpMethod === 'OPTIONS') return { statusCode: 200, headers: corsHeaders, body: '' };
-  if (event.httpMethod !== 'POST') return { statusCode: 405, headers: corsHeaders, body: 'Method Not Allowed' };
+  const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_ANON_KEY } = process.env;
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) return err(500, 'Supabase not configured');
 
-  // If SMTP is not configured, silently succeed (email is optional)
-  if (!process.env.SMTP_HOST || !process.env.SMTP_USER) {
-    console.warn('Email not configured — set SMTP_HOST, SMTP_USER, SMTP_PASS in Netlify env vars');
-    return { statusCode: 200, headers: corsHeaders, body: JSON.stringify({ sent: false, reason: 'not_configured' }) };
-  }
+  // Verify caller is authenticated
+  const authHeader = event.headers.authorization || event.headers.Authorization || '';
+  if (!authHeader.startsWith('Bearer ')) return err(401, 'Missing Authorization header');
+
+  const token = authHeader.slice(7);
+  const supabaseUser = createClient(SUPABASE_URL, SUPABASE_ANON_KEY || '', {
+    global: { headers: { Authorization: `Bearer ${token}` } }
+  });
+
+  const { data: { user }, error: authErr } = await supabaseUser.auth.getUser();
+  if (authErr || !user) return err(401, 'Invalid or expired token');
+
+  // Verify caller is admin
+  const admin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+  const { data: callerProfile } = await admin.from('profiles').select('role').eq('id', user.id).single();
+  if (!callerProfile || callerProfile.role !== 'admin') return err(403, 'Admin access required');
+
+  let body;
+  try { body = JSON.parse(event.body || '{}'); } catch { return err(400, 'Invalid JSON body'); }
+
+  const { action } = body;
 
   try {
-    const body = JSON.parse(event.body || '{}');
-    const { type, to, data = {} } = body;
+    // LIST all users
+    if (action === 'list') {
+      const { data: profiles, error } = await admin
+        .from('profiles').select('*').order('created_at');
+      if (error) return err(500, error.message);
+      return ok({ users: profiles || [] });
+    }
 
-    if (!to || !type) return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: 'Missing to or type' }) };
+    // CREATE user
+    if (action === 'create') {
+      const { email, password, name, role = 'staff', status = 'Active', department = '', custom_perms = [] } = body;
+      if (!email || !password || !name) return err(400, 'email, password and name are required');
 
-    const { subject, html } = buildTemplate(type, data);
-    const recipients = Array.isArray(to) ? to.join(', ') : to;
+      const { data: authData, error: createErr } = await admin.auth.admin.createUser({
+        email,
+        password,
+        email_confirm: true,
+        user_metadata: { name, role }
+      });
+      if (createErr) return err(400, createErr.message);
 
-    const transporter = nodemailer.createTransport({
-      host:   process.env.SMTP_HOST,
-      port:   parseInt(process.env.SMTP_PORT || '587'),
-      secure: process.env.SMTP_SECURE === 'true',
-      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
-    });
+      const { error: profErr } = await admin.from('profiles').upsert({
+        id: authData.user.id,
+        email,
+        name,
+        role,
+        status,
+        department: department || null,
+        custom_perms
+      });
+      if (profErr) {
+        await admin.auth.admin.deleteUser(authData.user.id).catch(() => {});
+        return err(500, profErr.message);
+      }
 
-    await transporter.sendMail({
-      from: `"${process.env.FROM_NAME || 'InvOps'}" <${process.env.FROM_EMAIL || process.env.SMTP_USER}>`,
-      to: recipients,
-      subject,
-      html,
-      text: html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
-    });
+      return ok({ userId: authData.user.id, email });
+    }
 
-    console.log(`Email sent [${type}] to ${recipients}`);
-    return { statusCode: 200, headers: corsHeaders, body: JSON.stringify({ sent: true }) };
+    // UPDATE user
+    if (action === 'update') {
+      const { userId, email, password, name, role, status, department, custom_perms } = body;
+      if (!userId) return err(400, 'userId is required');
 
-  } catch (err) {
-    console.error('Email error:', err.message);
-    return { statusCode: 500, headers: corsHeaders, body: JSON.stringify({ error: err.message }) };
+      const authUpdates = {};
+      if (email)    authUpdates.email    = email;
+      if (password) authUpdates.password = password;
+      if (name)     authUpdates.user_metadata = { name, role };
+
+      if (Object.keys(authUpdates).length) {
+        const { error: upErr } = await admin.auth.admin.updateUserById(userId, authUpdates);
+        if (upErr) return err(400, upErr.message);
+      }
+
+      const profileUpdates = {};
+      if (email        !== undefined) profileUpdates.email        = email;
+      if (name         !== undefined) profileUpdates.name         = name;
+      if (role         !== undefined) profileUpdates.role         = role;
+      if (status       !== undefined) profileUpdates.status       = status;
+      if (department   !== undefined) profileUpdates.department   = department;
+      if (custom_perms !== undefined) profileUpdates.custom_perms = custom_perms;
+
+      if (Object.keys(profileUpdates).length) {
+        const { error: profErr } = await admin.from('profiles').update(profileUpdates).eq('id', userId);
+        if (profErr) return err(500, profErr.message);
+      }
+
+      return ok({ success: true });
+    }
+
+    // DELETE user
+    if (action === 'delete') {
+      const { userId } = body;
+      if (!userId) return err(400, 'userId is required');
+      const { error: delErr } = await admin.auth.admin.deleteUser(userId);
+      if (delErr) return err(400, delErr.message);
+      return ok({ success: true });
+    }
+
+    return err(400, `Unknown action: ${action}`);
+
+  } catch (e) {
+    console.error('admin-user error:', e);
+    return err(500, e.message);
   }
 };
