@@ -1,151 +1,126 @@
-/**
- * InvOps — Admin User Management Function
- * POST /.netlify/functions/admin-user
- *
- * Requires service role key (never put this in the browser).
- * Environment variables needed in Netlify:
- *   SUPABASE_URL               your project URL
- *   SUPABASE_SERVICE_ROLE_KEY  from Supabase → Settings → API → service_role
- *   SUPABASE_ANON_KEY          from Supabase → Settings → API → anon/public
- *
- * Body (JSON):
- *   action  — 'create' | 'update' | 'delete' | 'list'
- *   + action-specific fields (see below)
- *
- * All requests must include: Authorization: Bearer <access_token>
- * The caller must have role = 'admin' in the profiles table.
- */
-
-const { createClient } = require('@supabase/supabase-js');
-
-const CORS = {
-  'Access-Control-Allow-Origin':  '*',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS'
-};
-
-function ok(data)  { return { statusCode: 200, headers: CORS, body: JSON.stringify(data) }; }
-function err(code, msg) { return { statusCode: code, headers: CORS, body: JSON.stringify({ error: msg }) }; }
-
 exports.handler = async (event) => {
+  const CORS = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Methods': 'POST, OPTIONS'
+  };
+
   if (event.httpMethod === 'OPTIONS') return { statusCode: 200, headers: CORS, body: '' };
-  if (event.httpMethod !== 'POST')    return err(405, 'Method Not Allowed');
+  if (event.httpMethod !== 'POST') return { statusCode: 405, headers: CORS, body: 'Method Not Allowed' };
 
-  const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_ANON_KEY } = process.env;
-  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) return err(500, 'Supabase service role not configured');
-
-  // ── Verify caller is authenticated ──
-  const authHeader = event.headers.authorization || event.headers.Authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) return err(401, 'Missing Authorization header');
-
-  const token = authHeader.slice(7);
-  const supabaseUser = createClient(SUPABASE_URL, SUPABASE_ANON_KEY || '', {
-    global: { headers: { Authorization: `Bearer ${token}` } }
-  });
-  const { data: { user }, error: authErr } = await supabaseUser.auth.getUser();
-  if (authErr || !user) return err(401, 'Invalid or expired token');
-
-  // ── Verify caller is admin ──
-  const admin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-  const { data: callerProfile } = await admin.from('profiles').select('role').eq('id', user.id).single();
-  if (!callerProfile || callerProfile.role !== 'admin') return err(403, 'Admin access required');
-
-  let body;
-  try { body = JSON.parse(event.body || '{}'); }
-  catch { return err(400, 'Invalid JSON body'); }
-
-  const { action } = body;
+  const RESEND_KEY = process.env.RESEND_API_KEY;
+  if (!RESEND_KEY) {
+    console.warn('RESEND_API_KEY not set');
+    return { statusCode: 200, headers: CORS, body: JSON.stringify({ sent: false, reason: 'not_configured' }) };
+  }
 
   try {
-    // ── LIST USERS ──────────────────────────────────────────────────────────
-    if (action === 'list') {
-      const { data: profiles, error: pErr } = await admin
-        .from('profiles')
-        .select('*')
-        .order('created_at');
-      if (pErr) return err(500, pErr.message);
-      return ok({ users: profiles || [] });
-    }
+    const { type, to, data = {} } = JSON.parse(event.body || '{}');
+    if (!to || !type) return { statusCode: 400, headers: CORS, body: JSON.stringify({ error: 'Missing to or type' }) };
 
-    // ── CREATE USER ─────────────────────────────────────────────────────────
-    if (action === 'create') {
-      const { email, password, name, role='staff', status='Active', department='', custom_perms=[] } = body;
-      if (!email || !password || !name) return err(400, 'email, password and name are required');
+    const org = data.org || 'InvOps';
+    const recipients = Array.isArray(to) ? to : [to];
 
-      // Create auth user
-      const { data: authData, error: createErr } = await admin.auth.admin.createUser({
-        email,
-        password,
-        email_confirm: true,          // skip email verification for admin-created users
-        user_metadata: { name, role }
-      });
-      if (createErr) return err(400, createErr.message);
-
-      // Upsert profile (trigger may have already created it)
-      const { error: profErr } = await admin.from('profiles').upsert({
-        id: authData.user.id,
-        email,
-        name,
-        role,
-        status,
-        department: department || null,
-        custom_perms
-      });
-      if (profErr) {
-        // Try to clean up the auth user if profile failed
-        await admin.auth.admin.deleteUser(authData.user.id).catch(() => {});
-        return err(500, profErr.message);
+    const tpl = {
+      request_submitted: {
+        subject: `[${org}] New Request ${data.requestId} — ${data.department}`,
+        html: `<h2>📋 New Inventory Request</h2>
+<p><b>Request ID:</b> ${data.requestId}</p>
+<p><b>Submitted By:</b> ${data.requestedByName}</p>
+<p><b>Department:</b> ${data.department}</p>
+<p><b>Purpose:</b> ${data.purpose}</p>
+<p><b>Priority:</b> ${data.priority}</p>
+<p><b>Items:</b> ${data.itemSummary}</p>
+<p><b>Date:</b> ${data.date}</p>
+<br><p>Please log in to InvOps to review and approve this request.</p>`
+      },
+      request_approved_l1: {
+        subject: `[${org}] Request ${data.requestId} — Approved at L1`,
+        html: `<h2>✅ Request Approved (L1)</h2>
+<p>Your request <b>${data.requestId}</b> has been approved at Level 1 and is now awaiting final approval.</p>
+<p><b>Approved By:</b> ${data.approvedBy}</p>
+${data.comment ? `<p><b>Comment:</b> ${data.comment}</p>` : ''}
+<br><p>You will be notified when final approval is granted.</p>`
+      },
+      request_approved_final: {
+        subject: `[${org}] Request ${data.requestId} — Fully Approved`,
+        html: `<h2>✅ Request Fully Approved</h2>
+<p>Your request <b>${data.requestId}</b> has received final approval and is ready for disbursement.</p>
+<p><b>Approved By:</b> ${data.approvedBy}</p>
+${data.comment ? `<p><b>Comment:</b> ${data.comment}</p>` : ''}
+<br><p>The store team will process your items shortly.</p>`
+      },
+      request_rejected: {
+        subject: `[${org}] Request ${data.requestId} — Rejected`,
+        html: `<h2>❌ Request Rejected</h2>
+<p>Your request <b>${data.requestId}</b> has been rejected.</p>
+<p><b>Rejected By:</b> ${data.rejectedBy}</p>
+<p><b>Reason:</b> ${data.comment || 'No reason provided'}</p>
+<br><p>You may submit a revised request if appropriate.</p>`
+      },
+      request_disbursed: {
+        subject: `[${org}] Request ${data.requestId} — Items Disbursed`,
+        html: `<h2>📤 Items Disbursed</h2>
+<p>The items for your request <b>${data.requestId}</b> have been disbursed.</p>
+<p><b>Disbursed By:</b> ${data.disbursedBy}</p>
+<p><b>Date:</b> ${data.date}</p>
+<p><b>Items:</b> ${data.itemSummary}</p>
+${data.note ? `<p><b>Note:</b> ${data.note}</p>` : ''}`
+      },
+      stock_alert: {
+        subject: `[${org}] ⚠️ Stock Alert — ${data.criticalCount} critical, ${data.lowCount} low`,
+        html: `<h2>⚠️ Inventory Stock Alert</h2>
+<p>The following stock levels require immediate attention:</p>
+<p><b>Critical / Out of Stock:</b> ${data.criticalCount} items</p>
+<p><b>Low Stock:</b> ${data.lowCount} items</p>
+<br><p>Please log in to InvOps to review and arrange restocking.</p>`
+      },
+      new_user_welcome: {
+        subject: `[${org}] Welcome to InvOps — Your Account is Ready`,
+        html: `<h2>👋 Welcome to InvOps!</h2>
+<p>Your account has been created by the system administrator.</p>
+<p><b>Email:</b> ${data.email}</p>
+<p><b>Role:</b> ${data.role}</p>
+<br><p>Please sign in at your InvOps site and change your password as soon as possible.</p>`
       }
+    };
 
-      return ok({ userId: authData.user.id, email });
-    }
+    const tmpl = tpl[type] || {
+      subject: `[${org}] System Notification`,
+      html: `<p>${JSON.stringify(data)}</p>`
+    };
 
-    // ── UPDATE USER ─────────────────────────────────────────────────────────
-    if (action === 'update') {
-      const { userId, email, password, name, role, status, department, custom_perms } = body;
-      if (!userId) return err(400, 'userId is required');
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${RESEND_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        from: `${org} <onboarding@resend.dev>`,
+        to: recipients,
+        subject: tmpl.subject,
+        html: `<!DOCTYPE html><html><body style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;color:#1E293B">
+<div style="background:#0D9488;padding:16px 20px;border-radius:8px 8px 0 0">
+  <span style="color:#fff;font-size:18px;font-weight:bold">📦 ${org}</span>
+  <span style="color:rgba(255,255,255,0.7);font-size:12px;margin-left:10px">Inventory Management System</span>
+</div>
+<div style="background:#fff;border:1px solid #E3E8F0;border-top:none;padding:24px;border-radius:0 0 8px 8px">
+${tmpl.html}
+</div>
+<p style="font-size:11px;color:#94A3B8;margin-top:12px;text-align:center">This is an automated notification from ${org} InvOps. Do not reply.</p>
+</body></html>`
+      })
+    });
 
-      // Update auth (email / password)
-      const authUpdates = {};
-      if (email)    authUpdates.email    = email;
-      if (password) authUpdates.password = password;
-      if (name)     authUpdates.user_metadata = { name, role };
-      if (Object.keys(authUpdates).length) {
-        const { error: upErr } = await admin.auth.admin.updateUserById(userId, authUpdates);
-        if (upErr) return err(400, upErr.message);
-      }
+    const result = await res.json();
+    if (!res.ok) throw new Error(result.message || JSON.stringify(result));
 
-      // Update profile
-      const profileUpdates = {};
-      if (email        !== undefined) profileUpdates.email        = email;
-      if (name         !== undefined) profileUpdates.name         = name;
-      if (role         !== undefined) profileUpdates.role         = role;
-      if (status       !== undefined) profileUpdates.status       = status;
-      if (department   !== undefined) profileUpdates.department   = department;
-      if (custom_perms !== undefined) profileUpdates.custom_perms = custom_perms;
+    console.log(`Email sent [${type}] to ${recipients.join(', ')}`);
+    return { statusCode: 200, headers: CORS, body: JSON.stringify({ sent: true, id: result.id }) };
 
-      if (Object.keys(profileUpdates).length) {
-        const { error: profErr } = await admin.from('profiles').update(profileUpdates).eq('id', userId);
-        if (profErr) return err(500, profErr.message);
-      }
-
-      return ok({ success: true });
-    }
-
-    // ── DELETE USER ─────────────────────────────────────────────────────────
-    if (action === 'delete') {
-      const { userId } = body;
-      if (!userId) return err(400, 'userId is required');
-
-      const { error: delErr } = await admin.auth.admin.deleteUser(userId);
-      if (delErr) return err(400, delErr.message);
-      return ok({ success: true });
-    }
-
-    return err(400, `Unknown action: ${action}`);
-
-  } catch (e) {
-    console.error('admin-user error:', e);
-    return err(500, e.message);
+  } catch (err) {
+    console.error('Email error:', err.message);
+    return { statusCode: 500, headers: CORS, body: JSON.stringify({ error: err.message }) };
   }
 };
