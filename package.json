@@ -1,0 +1,8 @@
+{
+  "name": "invops",
+  "version": "1.0.0",
+  "dependencies": {
+    "nodemailer": "^6.9.15",
+    "@supabase/supabase-js": "^2.45.0"
+  }
+}
